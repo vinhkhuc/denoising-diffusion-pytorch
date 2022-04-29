@@ -131,6 +131,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+.vscode/
+*.png
+*.jpg
+
 datasets/wikiart-small/
 models/*pt
-data/*.png
