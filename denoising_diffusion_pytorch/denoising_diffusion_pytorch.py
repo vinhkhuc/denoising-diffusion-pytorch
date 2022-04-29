@@ -17,6 +17,14 @@ from PIL import Image
 from tqdm import tqdm
 from einops import rearrange
 
+try:
+    from apex import amp
+    APEX_AVAILABLE = True
+except:
+    APEX_AVAILABLE = False
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 # helpers functions
 
 def exists(x):
@@ -324,9 +332,12 @@ class GaussianDiffusion(nn.Module):
         self.num_timesteps = int(timesteps)
         self.loss_type = loss_type
 
-        self.register_buffer('betas', betas)
-        self.register_buffer('alphas_cumprod', alphas_cumprod)
-        self.register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
+        to_torch = partial(torch.tensor, dtype=torch.float32)
+
+        # calculations for p_\theta(x_{t-1} | x_t)
+        self.register_buffer('betas', to_torch(betas))
+        self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
+        self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
 
         # calculations for diffusion q(x_t | x_{t-1}) and others
 
@@ -350,11 +361,12 @@ class GaussianDiffusion(nn.Module):
         self.register_buffer('posterior_mean_coef1', betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
         self.register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
 
-    def q_mean_variance(self, x_start, t):
-        mean = extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
-        variance = extract(1. - self.alphas_cumprod, t, x_start.shape)
-        log_variance = extract(self.log_one_minus_alphas_cumprod, t, x_start.shape)
-        return mean, variance, log_variance
+    # # NOT BEING USED
+    # def q_mean_variance(self, x_start, t):
+    #     mean = extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
+    #     variance = extract(1. - self.alphas_cumprod, t, x_start.shape)
+    #     log_variance = extract(self.log_one_minus_alphas_cumprod, t, x_start.shape)  # just torch.log(variance)
+    #     return mean, variance, log_variance
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
@@ -406,21 +418,23 @@ class GaussianDiffusion(nn.Module):
         channels = self.channels
         return self.p_sample_loop((batch_size, channels, image_size, image_size))
 
-    @torch.no_grad()
-    def interpolate(self, x1, x2, t = None, lam = 0.5):
-        b, *_, device = *x1.shape, x1.device
-        t = default(t, self.num_timesteps - 1)
-
-        assert x1.shape == x2.shape
-
-        t_batched = torch.stack([torch.tensor(t, device=device)] * b)
-        xt1, xt2 = map(lambda x: self.q_sample(x, t=t_batched), (x1, x2))
-
-        img = (1 - lam) * xt1 + lam * xt2
-        for i in tqdm(reversed(range(0, t)), desc='interpolation sample time step', total=t):
-            img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long))
-
-        return img
+    # # NOT BEING USED. It's probably from the paper DDPM
+    # # TODO: Adapted this logic for inpainting
+    # @torch.no_grad()
+    # def interpolate(self, x1, x2, t = None, lam = 0.5):
+    #     b, *_, device = *x1.shape, x1.device
+    #     t = default(t, self.num_timesteps - 1)
+    #
+    #     assert x1.shape == x2.shape
+    #
+    #     t_batched = torch.stack([torch.tensor(t, device=device)] * b)
+    #     xt1, xt2 = map(lambda x: self.q_sample(x, t=t_batched), (x1, x2))
+    #
+    #     img = (1 - lam) * xt1 + lam * xt2
+    #     for i in tqdm(reversed(range(0, t)), desc='interpolation sample time step', total=t):
+    #         img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long))
+    #
+    #     return img
 
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
@@ -554,12 +568,9 @@ class Trainer(object):
     def train(self):
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
-                data = next(self.dl).cuda()
-
-                with autocast(enabled = self.amp):
-                    loss = self.model(data)
-                    self.scaler.scale(loss / self.gradient_accumulate_every).backward()
-
+                # data = next(self.dl).cuda()
+                data = next(self.dl).to(DEVICE)
+                loss = self.model(data)
                 print(f'{self.step}: {loss.item()}')
 
             self.scaler.step(self.opt)
